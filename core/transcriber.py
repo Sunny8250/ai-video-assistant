@@ -122,6 +122,16 @@ class _WhisperStdoutInterceptor:
                 pass
 
 
+try:
+    import spaces
+    @spaces.GPU(duration=120)
+    def _run_whisper_inference(model, chunk_path):
+        return model.transcribe(chunk_path, task="transcribe", verbose=True)
+except Exception:
+    def _run_whisper_inference(model, chunk_path):
+        return model.transcribe(chunk_path, task="transcribe", verbose=True)
+
+
 def transcribe_chunk_whisper(chunk_path: str, chunk_idx: int = 0, total_chunks: int = 1, status_callback=None) -> str:
     model = load_model()  
     duration = _get_wav_duration_seconds(chunk_path)
@@ -130,7 +140,7 @@ def transcribe_chunk_whisper(chunk_path: str, chunk_idx: int = 0, total_chunks: 
     interceptor = _WhisperStdoutInterceptor(old_stdout, chunk_idx, total_chunks, duration, status_callback)
     sys.stdout = interceptor
     try:
-        result = model.transcribe(chunk_path, task="transcribe", verbose=True)  
+        result = _run_whisper_inference(model, chunk_path)
     finally:
         sys.stdout = old_stdout
         if interceptor.buffer.strip():

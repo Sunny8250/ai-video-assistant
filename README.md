@@ -1,3 +1,15 @@
+---
+title: AI Video Assistant
+emoji: 🎬
+colorFrom: purple
+colorTo: indigo
+sdk: gradio
+sdk_version: 6.30.0
+app_file: gradio_app.py
+short_description: Transcribe, summarize & chat with videos using AI
+pinned: false
+---
+
 # 🎬 AI Video Assistant
 
 An AI-powered meeting and video assistant that downloads, transcribes, summarizes, extracts action items & key decisions, and lets you chat with your meetings using LangChain RAG.
