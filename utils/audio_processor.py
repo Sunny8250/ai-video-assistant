@@ -54,8 +54,8 @@ def sanitize_youtube_url(url: str) -> str:
 def _build_ydl_opts(status_callback=None) -> dict:
     """Build yt-dlp options for YouTube audio download.
 
-    Uses Node.js + yt-dlp-ejs runtime for JS challenge solving,
-    plus cookies.txt if present for authentication.
+    Uses Node.js/Deno runtime for JS challenge solving if available,
+    plus YOUTUBE_COOKIES secret or cookies.txt if present for authentication.
     """
     opts = {
         "format": "bestaudio/best",
@@ -68,10 +68,23 @@ def _build_ydl_opts(status_callback=None) -> dict:
                 "preferredquality": "192",
             }
         ],
-        "js_runtimes": {"node": {}},
         "quiet": True,
         "no_warnings": False,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb", "web"],
+            }
+        },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
     }
+
+    if shutil.which("node"):
+        opts["js_runtimes"] = {"node": {}}
+    elif shutil.which("deno"):
+        opts["js_runtimes"] = {"deno": {}}
 
     if status_callback:
         def ydl_progress_hook(d):
@@ -88,19 +101,31 @@ def _build_ydl_opts(status_callback=None) -> dict:
 
         opts["progress_hooks"] = [ydl_progress_hook]
 
-    # Add cookies file for YouTube auth if present
+    # Check for raw cookies in environment or Streamlit secrets
+    raw_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
+    if not raw_cookies:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "YOUTUBE_COOKIES" in st.secrets:
+                raw_cookies = str(st.secrets["YOUTUBE_COOKIES"]).strip()
+        except Exception:
+            pass
+
     temp_cookie_path = None
-    cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip() or _DEFAULT_COOKIES_FILE
-    if os.path.exists(cookies_file):
-        # yt-dlp by default modifies and overwrites the cookiefile on exit.
-        # If YouTube returns a bot-challenge or login-required response, yt-dlp
-        # overwrites the user's authenticated cookies with stripped session cookies!
-        # To prevent cookies.txt from ever being corrupted, we use a temporary copy.
-        temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_cookies_")
-        os.close(temp_fd)
-        shutil.copyfile(cookies_file, temp_cookie_path)
+    if raw_cookies:
+        temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_env_cookies_")
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            f.write(raw_cookies)
         opts["cookiefile"] = temp_cookie_path
-        print(f"  [Cookies] Using protected copy of: {cookies_file}")
+        print("  [Cookies] Loaded cookies from secrets/environment")
+    else:
+        cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip() or _DEFAULT_COOKIES_FILE
+        if os.path.exists(cookies_file):
+            temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_cookies_")
+            os.close(temp_fd)
+            shutil.copyfile(cookies_file, temp_cookie_path)
+            opts["cookiefile"] = temp_cookie_path
+            print(f"  [Cookies] Using protected copy of: {cookies_file}")
 
     return opts, temp_cookie_path
 
@@ -123,6 +148,16 @@ def download_youtube_audio(url: str, status_callback=None) -> str:
                         wav_path = os.path.join(DOWNLOAD_DIR, f)
                         break
         return wav_path
+    except Exception as e:
+        err_str = str(e)
+        if any(keyword in err_str for keyword in ["403", "Forbidden", "confirm you're not a bot", "bot"]):
+            raise RuntimeError(
+                "YouTube has blocked audio download on the cloud server (HTTP 403: Forbidden / Bot Check).\n\n"
+                "💡 To solve this:\n"
+                "1. Upload your video or audio file directly using the 'Upload Audio / Video File' button in the sidebar (recommended).\n"
+                "2. Or export your YouTube cookies and paste them into Streamlit Cloud App Settings -> Secrets as YOUTUBE_COOKIES."
+            ) from e
+        raise e
     finally:
         if temp_cookie_path and os.path.exists(temp_cookie_path):
             try:

@@ -1,13 +1,25 @@
-import streamlit as st
+import os
+import sys
 import time
 from dotenv import load_dotenv
-from utils.audio_processor import process_input, sanitize_youtube_url
+import streamlit as st
+
+load_dotenv()
+
+# Synchronize Streamlit Cloud secrets into os.environ
+try:
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, str) and k not in os.environ:
+                os.environ[k] = v
+except Exception:
+    pass
+
+from utils.audio_processor import process_input, sanitize_youtube_url, DOWNLOAD_DIR
 from core.transcriber import transcribe_all
 from core.summarizer import summarize, generate_title
 from core.extractor import extract_action_items, extract_key_decisions, extract_questions
 from core.rag_engine import build_rag_chain, ask_question
-
-load_dotenv()
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -450,6 +462,12 @@ with st.sidebar:
     st.markdown('<span class="badge badge-purple">Input</span>', unsafe_allow_html=True)
     source = st.text_input("YouTube URL or File Path", placeholder="https://youtube.com/watch?v=... or /path/to/file.mp4")
 
+    uploaded_file = st.file_uploader(
+        "Or Upload Audio / Video File",
+        type=["mp4", "m4a", "wav", "mp3", "webm", "ogg"],
+        help="Upload an audio or video file directly (ideal for cloud deployments when YouTube restricts datacenter IPs)."
+    )
+
     language = st.selectbox("Language", ["english", "hinglish"], index=0)
 
     run_btn = st.button("⚡  Analyse", use_container_width=True)
@@ -482,8 +500,17 @@ st.markdown("---")
 
 # ── Run Pipeline ────────────────────────────────────────────────────────────────
 if run_btn:
-    if not source.strip():
-        st.error("Please enter a YouTube URL or file path.")
+    target_source = None
+    if uploaded_file is not None:
+        save_path = os.path.join(DOWNLOAD_DIR, uploaded_file.name)
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        target_source = save_path
+    elif source and source.strip():
+        target_source = sanitize_youtube_url(source.strip())
+
+    if not target_source:
+        st.error("Please enter a YouTube URL or upload an audio/video file.")
     else:
         st.session_state.pipeline_done = False
         st.session_state.result = None
@@ -552,14 +579,14 @@ if run_btn:
             render_sidebar_steps()
 
         try:
-            clean_source = sanitize_youtube_url(source.strip())
+            display_name = os.path.basename(target_source) if os.path.exists(target_source) else target_source
             update_step("audio", "active")
-            update_progress(2, "Audio Processing", f"Target: {clean_source}")
+            update_progress(2, "Audio Processing", f"Target: {display_name}")
 
             def audio_cb(p, m):
                 update_progress(p, "Audio Processing", m)
 
-            chunks = process_input(clean_source, status_callback=audio_cb)
+            chunks = process_input(target_source, status_callback=audio_cb)
             update_step("audio", "done")
             update_progress(20, "Audio Ready", f"Audio segmented into {len(chunks)} chunk(s).")
 
