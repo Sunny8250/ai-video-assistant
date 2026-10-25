@@ -1,0 +1,46 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+cookies.txt
+cookies*.txt
+ytdlp_cookies_*.txt
+test_piece.wav
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Media Downloads & Vector DB
+downloades/
+downloads/
+vector_db/
+chroma_db/
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.ogg
+*.flac
+
+# Streamlit Local Secrets
+.streamlit/secrets.toml
+
+# IDE & System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
