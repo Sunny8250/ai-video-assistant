@@ -10,7 +10,7 @@ load_dotenv()
 try:
     if hasattr(st, "secrets"):
         for k, v in st.secrets.items():
-            if isinstance(v, str) and k not in os.environ:
+            if isinstance(v, str) and k != "YOUTUBE_COOKIES" and len(v) < 30000:
                 os.environ[k] = v
 except Exception:
     pass

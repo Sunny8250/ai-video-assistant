@@ -101,15 +101,20 @@ def _build_ydl_opts(status_callback=None) -> dict:
 
         opts["progress_hooks"] = [ydl_progress_hook]
 
-    # Check for raw cookies in environment or Streamlit secrets
-    raw_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
-    if not raw_cookies:
-        try:
-            import streamlit as st
-            if hasattr(st, "secrets") and "YOUTUBE_COOKIES" in st.secrets:
+    # Check for raw cookies in Streamlit secrets or environment
+    raw_cookies = ""
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets"):
+            if "YOUTUBE_COOKIES" in st.secrets:
                 raw_cookies = str(st.secrets["YOUTUBE_COOKIES"]).strip()
-        except Exception:
-            pass
+            elif "youtube_cookies" in st.secrets:
+                raw_cookies = str(st.secrets["youtube_cookies"]).strip()
+    except Exception:
+        pass
+
+    if not raw_cookies:
+        raw_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
 
     temp_cookie_path = None
     if raw_cookies:
