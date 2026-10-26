@@ -44,3 +44,4 @@ chroma_db/
 .DS_Store
 Thumbs.db
 *.log
+data/

@@ -132,7 +132,19 @@ except Exception:
         return model.transcribe(chunk_path, task="transcribe", verbose=True)
 
 
-def transcribe_chunk_whisper(chunk_path: str, chunk_idx: int = 0, total_chunks: int = 1, status_callback=None) -> str:
+def _format_time(seconds: float) -> str:
+    """Format seconds into [MM:SS] or [HH:MM:SS]."""
+    total_sec = max(int(seconds), 0)
+    m = total_sec // 60
+    s = total_sec % 60
+    h = m // 60
+    if h > 0:
+        m = m % 60
+        return f"[{h:02d}:{m:02d}:{s:02d}]"
+    return f"[{m:02d}:{s:02d}]"
+
+
+def transcribe_chunk_whisper(chunk_path: str, chunk_idx: int = 0, total_chunks: int = 1, status_callback=None, offset_sec: float = 0.0) -> tuple[str, str]:
     model = load_model()  
     duration = _get_wav_duration_seconds(chunk_path)
 
@@ -146,7 +158,20 @@ def transcribe_chunk_whisper(chunk_path: str, chunk_idx: int = 0, total_chunks: 
         if interceptor.buffer.strip():
             interceptor.write("\n")
 
-    return result["text"]  
+    raw_text = result.get("text", "").strip()
+    segments = result.get("segments", [])
+    
+    timestamped_lines = []
+    if segments:
+        for seg in segments:
+            seg_start = offset_sec + float(seg.get("start", 0.0))
+            ts_str = _format_time(seg_start)
+            seg_txt = seg.get("text", "").strip()
+            if seg_txt:
+                timestamped_lines.append(f"{ts_str} {seg_txt}")
+    
+    timestamped_text = "\n".join(timestamped_lines) if timestamped_lines else raw_text
+    return raw_text, timestamped_text  
 
 
 def _send_to_sarvam(piece_path: str) -> str:
@@ -172,7 +197,7 @@ def _send_to_sarvam(piece_path: str) -> str:
     return response.json().get("transcript", "")
 
 
-def transcribe_chunk_sarvam(chunk_path: str, chunk_idx: int = 0, total_chunks: int = 1, status_callback=None) -> str:
+def transcribe_chunk_sarvam(chunk_path: str, chunk_idx: int = 0, total_chunks: int = 1, status_callback=None, offset_sec: float = 0.0) -> tuple[str, str]:
     """
     Sarvam sync API only accepts ≤30s audio. We split this chunk into
     25-second pieces, send each separately, and join the transcripts.
@@ -184,6 +209,7 @@ def transcribe_chunk_sarvam(chunk_path: str, chunk_idx: int = 0, total_chunks: i
     piece_ms = SARVAM_PIECE_SECONDS * 1000
 
     full_text = ""
+    timestamped_lines = []
     total_pieces = (len(audio) + piece_ms - 1) // piece_ms
 
     chunk_span = 34.0 / max(total_chunks, 1)
@@ -199,28 +225,33 @@ def transcribe_chunk_sarvam(chunk_path: str, chunk_idx: int = 0, total_chunks: i
             if status_callback:
                 piece_pct = int(base_pct + ((i / max(total_pieces, 1)) * chunk_span))
                 status_callback(piece_pct, f"Sarvam AI piece {i + 1}/{total_pieces} (chunk {chunk_idx + 1}/{total_chunks})...")
-            full_text += _send_to_sarvam(piece_path) + " "
+            piece_text = _send_to_sarvam(piece_path).strip()
+            if piece_text:
+                full_text += piece_text + " "
+                seg_time = offset_sec + (i * SARVAM_PIECE_SECONDS)
+                timestamped_lines.append(f"{_format_time(seg_time)} {piece_text}")
         finally:
             if os.path.exists(piece_path):
                 os.remove(piece_path)
 
-    return full_text.strip()
+    timestamped_text = "\n".join(timestamped_lines) if timestamped_lines else full_text.strip()
+    return full_text.strip(), timestamped_text
 
 
-def transcribe_chunk(chunk_path: str, language: str = "english", chunk_idx: int = 0, total_chunks: int = 1, status_callback=None) -> str:
+def transcribe_chunk(chunk_path: str, language: str = "english", chunk_idx: int = 0, total_chunks: int = 1, status_callback=None, offset_sec: float = 0.0) -> tuple[str, str]:
     """
     Route one chunk to Whisper or Sarvam depending on language choice.
-    - english  → Whisper (local model)
-    - hinglish → Sarvam (translates to English while transcribing)
+    Returns (raw_text, timestamped_text).
     """
     if language.lower() == "hinglish":
-        return transcribe_chunk_sarvam(chunk_path, chunk_idx=chunk_idx, total_chunks=total_chunks, status_callback=status_callback)
-    return transcribe_chunk_whisper(chunk_path, chunk_idx=chunk_idx, total_chunks=total_chunks, status_callback=status_callback)
+        return transcribe_chunk_sarvam(chunk_path, chunk_idx=chunk_idx, total_chunks=total_chunks, status_callback=status_callback, offset_sec=offset_sec)
+    return transcribe_chunk_whisper(chunk_path, chunk_idx=chunk_idx, total_chunks=total_chunks, status_callback=status_callback, offset_sec=offset_sec)
 
 
-def transcribe_all(chunks: list, language: str = "english", status_callback=None) -> str:
-
+def transcribe_all(chunks: list, language: str = "english", status_callback=None, return_timestamps: bool = False):
+    """Transcribe all chunks and optionally return both raw transcript and timestamped transcript."""
     full_transcript = "" 
+    full_timestamped = []
 
     engine = "Sarvam AI" if language.lower() == "hinglish" else "Whisper"
     print(f"Using {engine} for transcription.")
@@ -228,6 +259,8 @@ def transcribe_all(chunks: list, language: str = "english", status_callback=None
         status_callback(22, f"Preparing {engine} for transcription...")
 
     total_chunks = len(chunks)
+    current_offset = 0.0
+
     for i, chunk in enumerate(chunks):  
         pct = int(25 + ((i) / max(total_chunks, 1)) * 34)
         msg = f"Transcribing chunk {i + 1}/{total_chunks} with {engine}..."
@@ -235,20 +268,32 @@ def transcribe_all(chunks: list, language: str = "english", status_callback=None
         if status_callback:
             status_callback(pct, msg)
 
-        text = transcribe_chunk(
+        raw_chunk, ts_chunk = transcribe_chunk(
             chunk,
             language=language,
             chunk_idx=i,
             total_chunks=total_chunks,
             status_callback=status_callback,
+            offset_sec=current_offset,
         )  
 
-        full_transcript += text + " "  
+        full_transcript += raw_chunk + " "
+        if ts_chunk:
+            full_timestamped.append(ts_chunk)
 
-    word_count = len(full_transcript.split())
+        # Advance timeline offset by chunk duration
+        chunk_dur = _get_wav_duration_seconds(chunk)
+        current_offset += chunk_dur
+
+    raw_result = full_transcript.strip()
+    timestamped_result = "\n".join(full_timestamped).strip() if full_timestamped else raw_result
+
+    word_count = len(raw_result.split())
     done_msg = f"Transcription complete — {word_count} words transcribed."
     print(done_msg)
     if status_callback:
         status_callback(60, done_msg)
 
-    return full_transcript.strip()  
+    if return_timestamps:
+        return raw_result, timestamped_result
+    return raw_result  

@@ -42,11 +42,65 @@ def split_transcript(transcript: str) -> list:
     return splitter.split_text(transcript)
 
 
-def summarize(transcript: str, status_callback=None) -> str:
+def get_combine_prompt_for_mode(mode: str) -> str:
+    """Return tailored system prompt based on user-selected summary preset."""
+    mode_clean = mode.lower()
+    if "executive" in mode_clean:
+        return (
+            "You are an executive chief of staff. Create an Executive Brief for leadership:\n"
+            "### 🎯 Strategic Overview\n"
+            "- High-level summary in 3-4 impactful bullet points\n\n"
+            "### 💡 Key Outcomes & ROI\n"
+            "- Strategic decisions made and business impact\n\n"
+            "### ⚠️ Critical Blockers & Risks\n"
+            "- Key dependencies, risks, or resources required"
+        )
+    elif "technical" in mode_clean:
+        return (
+            "You are a principal software engineer. Create a Technical Deep-Dive summary:\n"
+            "### 🛠️ Architecture & System Design\n"
+            "- Core concepts, frameworks, and architecture patterns discussed\n\n"
+            "### ⚙️ Implementation & Technical Decisions\n"
+            "- Technical mechanisms, APIs, data flows, and trade-offs\n\n"
+            "### 🔍 Gotchas & Engineering Considerations\n"
+            "- Performance implications, potential bugs, or technical debt"
+        )
+    elif "study" in mode_clean or "lecture" in mode_clean:
+        return (
+            "You are a top academic instructor. Create structured Study & Lecture Notes:\n"
+            "### 📚 Core Concepts & Definitions\n"
+            "- Essential terms, theories, and concepts explained simply\n\n"
+            "### 📝 Key Takeaways & Explanations\n"
+            "- Detailed breakdown of each topic with bulleted notes\n\n"
+            "### 🃏 Flashcard Revision Q&A\n"
+            "- 3-5 high-yield Question & Answer pairs for quick review"
+        )
+    elif "email" in mode_clean:
+        return (
+            "You are an executive communications specialist. Draft a polished, ready-to-send follow-up email:\n"
+            "Subject: [Meeting Recap & Next Steps] <Topic>\n\n"
+            "Hi Team,\n\n"
+            "Thank you for attending today's session. Below is a concise recap:\n\n"
+            "**Key Discussion Points:**\n"
+            "- Point 1\n"
+            "- Point 2\n\n"
+            "**Immediate Next Steps:**\n"
+            "- Action 1\n\n"
+            "Best regards,"
+        )
+    else:
+        return (
+            "You are an expert meeting summarizer. Combine these partial summaries "
+            "into a comprehensive, well-structured professional meeting summary in bullet points, "
+            "covering all main topics, decisions, and nuances discussed."
+        )
+
+
+def summarize(transcript: str, mode: str = "comprehensive", status_callback=None) -> str:
     llm = get_llm()
 
     map_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Summarize this portion of a meeting transcript concisely."),
+        ("system", "Summarize this portion of a meeting transcript concisely in clear bullet points."),
         ("human", "{text}"),
     ])
 
@@ -65,12 +119,9 @@ def summarize(transcript: str, status_callback=None) -> str:
 
     combined = "\n\n".join(chunk_summaries)
 
+    system_instruction = get_combine_prompt_for_mode(mode)
     combined_prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are an expert meeting summarizer. Combine these partial summaries "
-            "into one final professional meeting summary in bullet points.",
-        ),
+        ("system", system_instruction),
         ("human", "{text}"),
     ])
 
@@ -82,11 +133,43 @@ def summarize(transcript: str, status_callback=None) -> str:
         | StrOutputParser()
     )
 
-    combine_msg = "Synthesizing executive meeting summary..."
+    combine_msg = f"Synthesizing {mode} summary..."
     print(f"  → {combine_msg}")
     if status_callback:
         status_callback(80, combine_msg)
     return _invoke_with_retry(combined_chain, combined)
+
+
+def generate_chapters(transcript: str, status_callback=None) -> str:
+    """Generate chronological chapters/milestones with timestamps for video/meeting navigation."""
+    llm = get_llm()
+
+    chapter_prompt = ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "You are an expert meeting video editor. Break down this meeting/video transcript into chronological "
+            "chapters with timestamps.\n"
+            "Format each chapter on a new line as:\n"
+            "- ⏱️ [MM:SS] - Chapter Title: Brief 1-sentence topic summary\n\n"
+            "If the transcript has timestamps, use them accurately. Otherwise estimate sequential progression starting from [00:00]. "
+            "Provide between 4 to 8 clear chapters. Return only the chapter list, no intro/outro.",
+        ),
+        ("human", "{text}"),
+    ])
+
+    chapter_chain = (
+        RunnablePassthrough()
+        | RunnableLambda(lambda x: {"text": x})
+        | chapter_prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    print("  → Generating video chapters...")
+    if status_callback:
+        status_callback(83, "Generating meeting chapters & timeline...")
+    sample_text = transcript[:8000] if len(transcript) > 8000 else transcript
+    return _invoke_with_retry(chapter_chain, sample_text)
 
 
 def generate_title(transcipt: str) -> str:
@@ -109,3 +192,4 @@ def generate_title(transcipt: str) -> str:
 
     print("  → Generating title...")
     return _invoke_with_retry(title_chain, transcipt[:2000])
+
