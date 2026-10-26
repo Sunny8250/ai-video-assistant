@@ -45,3 +45,5 @@ chroma_db/
 Thumbs.db
 *.log
 data/
+.agents/
+.claude/

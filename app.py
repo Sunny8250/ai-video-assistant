@@ -34,6 +34,7 @@ from core.export_manager import (
     generate_action_items_csv,
     generate_notion_slack_tasks,
 )
+from core.instant_transcriber import fetch_instant_transcript, has_youtube_captions
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -524,6 +525,19 @@ with st.sidebar:
 
     language = st.selectbox("Language", ["english", "hinglish"], index=0)
 
+    # ── Processing Modes ──
+    st.markdown('<span class="badge badge-purple" style="margin-top:0.75rem">⚡ Processing Pipeline</span>', unsafe_allow_html=True)
+    pipeline_mode = st.radio(
+        "Choose Pipeline Speed",
+        [
+            "✨ Auto (Instant if captions exist, else Deep Audio)",
+            "🚀 Instant Mode (2-5s, YouTube Captions)",
+            "🎙️ Deep Audio Mode (Whisper AI, High Accuracy)",
+        ],
+        index=0,
+        help="Instant Mode extracts existing YouTube captions in 2-4 seconds with zero audio download. Deep Audio Mode downloads audio and runs local Whisper transcription."
+    )
+
     # ── Summary Presets ──
     st.markdown('<span class="badge badge-cyan" style="margin-top:0.75rem">Summary Preset / Audience</span>', unsafe_allow_html=True)
     summary_mode = st.selectbox(
@@ -713,36 +727,66 @@ if run_btn:
 
         try:
             display_name = os.path.basename(target_source) if os.path.exists(target_source) else target_source
-            update_step("audio", "active")
-            update_progress(2, "Audio Processing", f"Target: {display_name}")
+            transcript = None
+            timestamped_transcript = None
+            used_instant_mode = False
 
-            def audio_cb(p, m):
-                update_progress(p, "Audio Processing", m)
+            is_youtube = ("youtube.com" in target_source or "youtu.be" in target_source)
+            should_try_instant = is_youtube and ("Instant" in pipeline_mode or "Auto" in pipeline_mode)
 
-            chunks = process_input(target_source, status_callback=audio_cb)
-            update_step("audio", "done")
-            update_progress(20, "Audio Ready", f"Audio segmented into {len(chunks)} chunk(s).")
+            # ── 1. Try Instant Mode (YouTube Captions) ──
+            if should_try_instant:
+                update_step("audio", "active")
+                update_progress(5, "Instant Mode", "Querying YouTube for existing captions/subtitles...")
+                raw_cap, ts_cap = fetch_instant_transcript(target_source)
+                if raw_cap and len(raw_cap.split()) >= 10:
+                    transcript = raw_cap
+                    timestamped_transcript = ts_cap
+                    used_instant_mode = True
+                    update_step("audio", "done")
+                    update_step("transcript", "done")
+                    word_count = len(transcript.split())
+                    update_progress(60, "Instant Captions Acquired", f"🚀 Fetched {word_count} words in 2 seconds! Audio download skipped.")
+                else:
+                    if "Instant Mode" in pipeline_mode and "Auto" not in pipeline_mode:
+                        update_progress(8, "Instant Mode Warning", "No captions found on YouTube. Falling back to Deep Audio Mode (Whisper AI)...")
+                    else:
+                        update_progress(8, "Auto Mode", "No pre-existing captions. Proceeding with Deep Audio Mode (Whisper AI)...")
 
-            update_step("transcript", "active")
-            engine_name = "Sarvam AI (Hinglish)" if language.lower() == "hinglish" else "Whisper"
-            update_progress(22, "Transcription", f"Initializing {engine_name}...")
+            # ── 2. Deep Audio Mode (Whisper / Sarvam) if captions not used ──
+            if not transcript:
+                update_step("audio", "active")
+                update_progress(10, "Audio Acquisition", f"Target: {display_name}")
 
-            def trans_cb(p, m):
-                update_progress(p, "Transcription", m)
+                def audio_cb(p, m):
+                    update_progress(p, "Audio Processing", m)
 
-            transcript, timestamped_transcript = transcribe_all(
-                chunks, language, status_callback=trans_cb, return_timestamps=True
-            )
-            update_step("transcript", "done")
-            word_count = len(transcript.split())
-            update_progress(60, "Transcription Complete", f"Transcribed {word_count} words successfully with timestamps.")
+                chunks = process_input(target_source, status_callback=audio_cb)
+                update_step("audio", "done")
+                update_progress(20, "Audio Ready", f"Audio segmented into {len(chunks)} chunk(s).")
 
+                update_step("transcript", "active")
+                engine_name = "Sarvam AI (Hinglish)" if language.lower() == "hinglish" else "Whisper"
+                update_progress(22, "Transcription", f"Initializing {engine_name}...")
+
+                def trans_cb(p, m):
+                    update_progress(p, "Transcription", m)
+
+                transcript, timestamped_transcript = transcribe_all(
+                    chunks, language, status_callback=trans_cb, return_timestamps=True
+                )
+                update_step("transcript", "done")
+                word_count = len(transcript.split())
+                update_progress(60, "Transcription Complete", f"Transcribed {word_count} words successfully with timestamps.")
+
+            # ── 3. Title Generation ──
             update_step("title", "active")
             update_progress(62, "Title Generation", "Analyzing context to generate meeting title...")
             title = generate_title(transcript)
             update_step("title", "done")
             update_progress(66, "Title Generated", f"Title: {title}")
 
+            # ── 4. Chapters & Timeline ──
             update_step("chapters", "active")
             update_progress(68, "Timeline Chapters", "Segmenting discussion into chronological topic chapters...")
             
@@ -753,6 +797,7 @@ if run_btn:
             update_step("chapters", "done")
             update_progress(72, "Chapters Ready", "Video chapters and timeline landmarks mapped.")
 
+            # ── 5. Summarisation ──
             update_step("summary", "active")
             update_progress(74, "Summarisation", f"Synthesizing {summary_mode} with Mistral AI...")
 
@@ -763,6 +808,7 @@ if run_btn:
             update_step("summary", "done")
             update_progress(84, "Summarisation Complete", f"{summary_mode} generated successfully.")
 
+            # ── 6. Information Extraction ──
             update_step("extract", "active")
             update_progress(86, "Information Extraction", "Extracting action items with tasks, owners & deadlines...")
             action_items = extract_action_items(transcript)
@@ -773,17 +819,20 @@ if run_btn:
             update_step("extract", "done")
             update_progress(94, "Extraction Complete", "Action items, decisions & questions extracted.")
 
+            # ── 7. RAG Engine ──
             update_step("rag", "active")
             update_progress(96, "RAG Engine", "Building ChromaDB vector embeddings & retriever...")
             rag_chain = build_rag_chain(transcript)
             update_step("rag", "done")
             update_progress(100, "Analysis Complete", "All pipeline artifacts generated! Rendering results...")
 
+            proc_label = "🚀 Instant Mode (YouTube Captions)" if used_instant_mode else "🎙️ Deep Audio Mode (Whisper AI)"
             result_data = {
                 "title": title,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "source": target_source,
                 "summary_mode": summary_mode,
+                "processing_mode": proc_label,
                 "language": language,
                 "transcript": transcript,
                 "timestamped_transcript": timestamped_transcript,
@@ -818,6 +867,7 @@ if st.session_state.result:
     r = st.session_state.result
     created_date = r.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     summary_badge = r.get("summary_mode", "Comprehensive Minutes")
+    proc_badge = r.get("processing_mode", "🎙️ Deep Audio Mode (Whisper AI)")
     slug = "".join(c if c.isalnum() else "_" for c in r.get("title", "meeting")[:25]).strip("_")
 
     # ── Title Banner ──
@@ -825,7 +875,10 @@ if st.session_state.result:
     <div class="card">
         <div class="card-title">
             <span>📌 {created_date} · {r.get('language', 'English').upper()}</span>
-            <span class="badge badge-purple">{summary_badge}</span>
+            <div>
+                <span class="badge badge-green" style="margin-right:0.35rem">{proc_badge}</span>
+                <span class="badge badge-purple">{summary_badge}</span>
+            </div>
         </div>
         <div style="font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:700;color:var(--text)">
             {r['title']}
@@ -834,6 +887,7 @@ if st.session_state.result:
             Source: <code>{r.get('source', 'Unknown')}</code>
         </div>
     </div>""", unsafe_allow_html=True)
+
 
     # ── Productivity & Export Toolbar ──
     md_content = generate_markdown_report(r)
