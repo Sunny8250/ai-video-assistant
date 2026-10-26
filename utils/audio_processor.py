@@ -51,17 +51,21 @@ def sanitize_youtube_url(url: str) -> str:
     return url
 
 
-def _build_ydl_opts(status_callback=None, player_client: str = "android") -> dict:
+def _build_ydl_opts(status_callback=None, player_client: str | None = "android", use_cookies: bool = True) -> tuple[dict, str | None]:
     """Build yt-dlp options for YouTube audio download.
 
-    Uses Android client by default which avoids cloud IP 403 blocks and PO-token requirements.
-    Uses Node.js/Deno runtime for JS challenge solving if available,
-    plus YOUTUBE_COOKIES secret or cookies.txt if present for authentication.
+    - Uses Android client by default which bypasses cloud IP 403 blocks and PO-token requirements.
+    - Forces IPv4 (0.0.0.0) to prevent datacenter IPv6 routing blocks.
+    - Explicitly sets ffmpeg_location if found.
+    - Only attaches cookies if they actually contain genuine youtube.com domain cookies to avoid session conflicts.
     """
     opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
         "noplaylist": True,
+        "source_address": "0.0.0.0",  # Force IPv4
+        "geo_bypass": True,
+        "nocheckcertificate": True,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -71,16 +75,25 @@ def _build_ydl_opts(status_callback=None, player_client: str = "android") -> dic
         ],
         "quiet": True,
         "no_warnings": False,
-        "extractor_args": {
+    }
+
+    # Explicitly supply FFmpeg directory if available
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        opts["ffmpeg_location"] = os.path.dirname(ffmpeg_bin)
+
+    if player_client:
+        opts["extractor_args"] = {
             "youtube": {
                 "player_client": [player_client],
             }
-        },
-        "http_headers": {
+        }
+    else:
+        # For default/desktop clients, use standard browser headers
+        opts["http_headers"] = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
-        },
-    }
+        }
 
     if shutil.which("node"):
         opts["js_runtimes"] = {"node": {}}
@@ -102,36 +115,47 @@ def _build_ydl_opts(status_callback=None, player_client: str = "android") -> dic
 
         opts["progress_hooks"] = [ydl_progress_hook]
 
-    # Check for raw cookies in Streamlit secrets or environment
-    raw_cookies = ""
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets"):
-            if "YOUTUBE_COOKIES" in st.secrets:
-                raw_cookies = str(st.secrets["YOUTUBE_COOKIES"]).strip()
-            elif "youtube_cookies" in st.secrets:
-                raw_cookies = str(st.secrets["youtube_cookies"]).strip()
-    except Exception:
-        pass
-
-    if not raw_cookies:
-        raw_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
-
     temp_cookie_path = None
-    if raw_cookies:
-        temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_env_cookies_")
-        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-            f.write(raw_cookies)
-        opts["cookiefile"] = temp_cookie_path
-        print("  [Cookies] Loaded cookies from secrets/environment")
-    else:
-        cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip() or _DEFAULT_COOKIES_FILE
-        if os.path.exists(cookies_file):
-            temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_cookies_")
-            os.close(temp_fd)
-            shutil.copyfile(cookies_file, temp_cookie_path)
+    if use_cookies:
+        # Check for raw cookies in Streamlit secrets or environment
+        raw_cookies = ""
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets"):
+                if "YOUTUBE_COOKIES" in st.secrets:
+                    raw_cookies = str(st.secrets["YOUTUBE_COOKIES"]).strip()
+                elif "youtube_cookies" in st.secrets:
+                    raw_cookies = str(st.secrets["youtube_cookies"]).strip()
+        except Exception:
+            pass
+
+        if not raw_cookies:
+            raw_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
+
+        # ONLY attach cookies if they contain actual youtube.com entries.
+        # Bogus or non-YouTube cookies cause YouTube to return "The page needs to be reloaded".
+        if raw_cookies and "youtube.com" in raw_cookies:
+            temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_env_cookies_")
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                f.write(raw_cookies)
             opts["cookiefile"] = temp_cookie_path
-            print(f"  [Cookies] Using protected copy of: {cookies_file}")
+            print("  [Cookies] Loaded valid YouTube cookies from secrets/environment")
+        else:
+            cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip() or _DEFAULT_COOKIES_FILE
+            if os.path.exists(cookies_file):
+                try:
+                    with open(cookies_file, "r", encoding="utf-8", errors="ignore") as f:
+                        file_content = f.read()
+                    if "youtube.com" in file_content:
+                        temp_fd, temp_cookie_path = tempfile.mkstemp(suffix=".txt", prefix="ytdlp_cookies_")
+                        os.close(temp_fd)
+                        shutil.copyfile(cookies_file, temp_cookie_path)
+                        opts["cookiefile"] = temp_cookie_path
+                        print(f"  [Cookies] Using protected copy of: {cookies_file}")
+                    else:
+                        print("  [Cookies] Ignoring cookies file because it contains no youtube.com cookies")
+                except Exception as ce:
+                    print(f"  [Cookies] Error reading cookie file: {ce}")
 
     return opts, temp_cookie_path
 
@@ -139,20 +163,41 @@ def _build_ydl_opts(status_callback=None, player_client: str = "android") -> dic
 def download_youtube_audio(url: str, status_callback=None) -> str:
     clean_url = sanitize_youtube_url(url)
     
-    # Try Android client first (bypasses cloud IP 403 blocks), then fallback to iOS and TV
-    clients_to_try = ["android", "ios", "tv"]
+    # Resilient strategy sequence:
+    # 1. Android client clean session (bypasses cloud IP 403 blocks and PO-token challenges)
+    # 2. Android client with cookies (if genuine YouTube cookies available)
+    # 3. Default yt-dlp client clean session
+    # 4. Default yt-dlp client with cookies
+    # 5. Mobile web client clean session
+    strategies = [
+        {"client": "android", "use_cookies": False, "desc": "Android client (clean session)"},
+        {"client": "android", "use_cookies": True,  "desc": "Android client (with cookies)"},
+        {"client": None,      "use_cookies": False, "desc": "Default client (clean session)"},
+        {"client": None,      "use_cookies": True,  "desc": "Default client (with cookies)"},
+        {"client": "mweb",    "use_cookies": False, "desc": "Mobile Web client"},
+    ]
+    
     last_error = None
     
-    for client in clients_to_try:
-        ydl_opts, temp_cookie_path = _build_ydl_opts(status_callback=status_callback, player_client=client)
+    for strat in strategies:
+        client = strat["client"]
+        use_cookies = strat["use_cookies"]
+        desc = strat["desc"]
+        
+        ydl_opts, temp_cookie_path = _build_ydl_opts(
+            status_callback=status_callback, 
+            player_client=client, 
+            use_cookies=use_cookies
+        )
         try:
+            print(f"  [yt-dlp] Attempting download with {desc}...")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(clean_url, download=True)
                 raw_filename = ydl.prepare_filename(info)
                 base_path = os.path.splitext(raw_filename)[0]
                 wav_path = base_path + ".wav"
                 
-                # Verify the file exists or locate it in DOWNLOAD_DIR
+                # Locate WAV file if extension was altered by FFmpeg
                 if not os.path.exists(wav_path):
                     title = info.get("title", "")
                     for f in os.listdir(DOWNLOAD_DIR):
@@ -160,10 +205,11 @@ def download_youtube_audio(url: str, status_callback=None) -> str:
                             wav_path = os.path.join(DOWNLOAD_DIR, f)
                             break
             if os.path.exists(wav_path):
+                print(f"  [yt-dlp] Success with {desc}: {wav_path}")
                 return wav_path
         except Exception as e:
             last_error = e
-            print(f"  [yt-dlp] Client '{client}' failed, trying next fallback...: {e}")
+            print(f"  [yt-dlp] {desc} failed: {e}")
             continue
         finally:
             if temp_cookie_path and os.path.exists(temp_cookie_path):
@@ -174,14 +220,16 @@ def download_youtube_audio(url: str, status_callback=None) -> str:
 
     if last_error:
         err_str = str(last_error)
-        if any(keyword in err_str for keyword in ["403", "Forbidden", "confirm you're not a bot", "bot"]):
-            raise RuntimeError(
-                "YouTube has blocked audio download on the cloud server (HTTP 403: Forbidden / Bot Check).\n\n"
-                "💡 To solve this:\n"
-                "1. Upload your video or audio file directly using the 'Upload Audio / Video File' button in the sidebar (recommended).\n"
-                "2. Or export your YouTube cookies and paste them into Streamlit Cloud App Settings -> Secrets as YOUTUBE_COOKIES."
-            ) from last_error
-        raise last_error
+        raise RuntimeError(
+            "YouTube audio acquisition failed on the cloud server.\n\n"
+            f"Details: {err_str}\n\n"
+            "💡 Recommended Solution:\n"
+            "Cloud platforms (Streamlit Cloud / AWS) often face strict YouTube rate limits and IP bot checks.\n"
+            "You can easily analyze your meeting by uploading the video or audio file directly:\n"
+            "1. Click 'Upload Audio / Video File' in the left sidebar.\n"
+            "2. Select your file (MP4, MP3, WAV, M4A, etc.) and hit 'ANALYSE'!"
+        ) from last_error
+
 
 
 
