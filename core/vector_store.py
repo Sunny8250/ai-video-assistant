@@ -1,12 +1,16 @@
 import os
-import shutil
+import re
+import chromadb
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
+CHROMA_PERSIST_DIR = os.path.join("data", "chroma_db")
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
 _embeddings_instance = None
+_chroma_client_instance = None
 
 
 def get_embeddings():
@@ -20,23 +24,47 @@ def get_embeddings():
     return _embeddings_instance
 
 
+def get_chroma_client() -> chromadb.PersistentClient:
+    """
+    Singleton PersistentClient pointing to data/chroma_db.
+    Using PersistentClient ensures SQLite schemas (tenants, collections)
+    are always initialized and fully thread-safe across Streamlit worker threads.
+    """
+    global _chroma_client_instance
+    if _chroma_client_instance is None:
+        os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+        _chroma_client_instance = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+    return _chroma_client_instance
+
+
+def _sanitize_collection_name(raw_name: str) -> str:
+    """Chroma collection names must be 3-63 chars, alphanumeric, dots, hyphens or underscores."""
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_name or "current_meeting").strip("_")
+    if len(clean) < 3:
+        clean = f"meeting_{clean}"
+    return clean[:60]
+
+
 def build_vector_store(
     transcript: str,
     summary: str = "",
     chapters: str = "",
     key_decisions: list | str = None,
     action_items: list | str = None,
+    session_id: str = "current_meeting",
 ) -> Chroma:
     """
-    Build an isolated in-memory Chroma vector store for the current meeting.
+    Build a session-isolated Chroma vector store using PersistentClient.
     Indexes:
       1. Executive summary & key concepts
       2. Chapters & discussion timeline
       3. Key decisions & action items
       4. Transcript text chunks
-    Running in-memory ensures zero cross-contamination between different meetings.
+    Using a persistent client ensures thread safety across Streamlit reruns,
+    while unique collection names guarantee zero cross-contamination.
     """
-    print("[RAG] Building isolated in-memory vector store...")
+    col_name = _sanitize_collection_name(session_id)
+    print(f"[RAG] Building vector store for collection: '{col_name}'...")
     docs: list[Document] = []
 
     # 1. Summary Document(s)
@@ -95,16 +123,35 @@ def build_vector_store(
     if not docs:
         docs.append(Document(page_content="Empty meeting session.", metadata={"type": "empty"}))
 
+    client = get_chroma_client()
     embeddings = get_embeddings()
 
-    # Build fresh in-memory Chroma instance (no persist_directory prevents old data leakage)
+    # Reset any existing collection with this name to prevent residual stale data
+    try:
+        client.delete_collection(col_name)
+    except Exception:
+        pass
+
     vector_store = Chroma.from_documents(
         documents=docs,
         embedding=embeddings,
+        client=client,
+        collection_name=col_name,
     )
 
-    print(f"[RAG] Indexed {len(docs)} document chunks successfully into vector store.")
+    print(f"[RAG] Indexed {len(docs)} document chunks successfully into collection '{col_name}'.")
     return vector_store
+
+
+def load_vector_store(session_id: str = "current_meeting") -> Chroma:
+    col_name = _sanitize_collection_name(session_id)
+    client = get_chroma_client()
+    embeddings = get_embeddings()
+    return Chroma(
+        client=client,
+        collection_name=col_name,
+        embedding_function=embeddings,
+    )
 
 
 def get_retriever(vector_store: Chroma, k: int = 6):
@@ -112,13 +159,3 @@ def get_retriever(vector_store: Chroma, k: int = 6):
         search_type="similarity",
         search_kwargs={"k": k},
     )
-
-
-def clear_legacy_vector_db(dir_path: str = "vector_db"):
-    """Clean up any old legacy Chroma disk folder to save space and avoid stale state."""
-    try:
-        if os.path.exists(dir_path):
-            shutil.rmtree(dir_path)
-            print(f"[RAG] Cleared legacy {dir_path} disk directory.")
-    except Exception as e:
-        print(f"[RAG] Warning clearing {dir_path}: {e}")

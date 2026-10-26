@@ -24,9 +24,10 @@ def build_rag_chain(
     chapters: str = "",
     key_decisions: list | str = None,
     action_items: list | str = None,
+    session_id: str = "current_meeting",
 ):
     """
-    Builds a grounded LCEL RAG pipeline with an in-memory vector store.
+    Builds a grounded LCEL RAG pipeline with a thread-safe persistent vector store.
     Indexes both the high-level meeting summary/chapters and granular transcript chunks.
     """
     vector_store = build_vector_store(
@@ -35,6 +36,7 @@ def build_rag_chain(
         chapters=chapters,
         key_decisions=key_decisions,
         action_items=action_items,
+        session_id=session_id,
     )
 
     retriever = get_retriever(vector_store, k=6)

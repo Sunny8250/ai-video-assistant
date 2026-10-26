@@ -828,12 +828,14 @@ if run_btn:
             # ── 7. RAG Engine ──
             update_step("rag", "active")
             update_progress(96, "RAG Engine", "Building semantic embeddings & grounded retriever...")
+            session_id = f"sess_{int(time.time())}"
             rag_chain = build_rag_chain(
                 transcript=transcript,
                 summary=summary,
                 chapters=chapters,
                 key_decisions=decisions,
                 action_items=action_items,
+                session_id=session_id,
             )
             update_step("rag", "done")
             update_progress(100, "Analysis Complete", "All pipeline artifacts generated! Rendering results...")
@@ -1063,8 +1065,20 @@ if st.session_state.result:
         send_btn = st.button("Send →", use_container_width=True)
 
     if send_btn and user_input.strip():
-        with st.spinner("Analyzing meeting transcript…"):
-            answer = ask_question(r["rag_chain"], user_input.strip())
+        with st.spinner("Analyzing meeting context…"):
+            try:
+                answer = ask_question(r["rag_chain"], user_input.strip())
+            except Exception as e:
+                print(f"[RAG] Reconnecting vector store and rebuilding chain: {e}")
+                r["rag_chain"] = build_rag_chain(
+                    transcript=r.get("transcript", ""),
+                    summary=r.get("summary", ""),
+                    chapters=r.get("chapters", ""),
+                    key_decisions=r.get("key_decisions", []),
+                    action_items=r.get("action_items", []),
+                    session_id=r.get("id", "current_meeting"),
+                )
+                answer = ask_question(r["rag_chain"], user_input.strip())
         st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
