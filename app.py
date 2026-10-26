@@ -590,7 +590,13 @@ with st.sidebar:
                         "open_questions": sess["open_questions"],
                         "transcript": sess["transcript"],
                         "timestamped_transcript": sess.get("timestamped_transcript", sess["transcript"]),
-                        "rag_chain": build_rag_chain(sess["transcript"]),
+                        "rag_chain": build_rag_chain(
+                            transcript=sess["transcript"],
+                            summary=sess.get("summary", ""),
+                            chapters=sess.get("chapters", ""),
+                            key_decisions=sess.get("key_decisions", []),
+                            action_items=sess.get("action_items", []),
+                        ),
                     }
                     st.session_state.chat_history = sess.get("chat_history", [])
                     st.session_state.current_session_id = sess["id"]
@@ -821,8 +827,14 @@ if run_btn:
 
             # ── 7. RAG Engine ──
             update_step("rag", "active")
-            update_progress(96, "RAG Engine", "Building ChromaDB vector embeddings & retriever...")
-            rag_chain = build_rag_chain(transcript)
+            update_progress(96, "RAG Engine", "Building semantic embeddings & grounded retriever...")
+            rag_chain = build_rag_chain(
+                transcript=transcript,
+                summary=summary,
+                chapters=chapters,
+                key_decisions=decisions,
+                action_items=action_items,
+            )
             update_step("rag", "done")
             update_progress(100, "Analysis Complete", "All pipeline artifacts generated! Rendering results...")
 
