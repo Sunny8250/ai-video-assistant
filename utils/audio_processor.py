@@ -51,9 +51,10 @@ def sanitize_youtube_url(url: str) -> str:
     return url
 
 
-def _build_ydl_opts(status_callback=None) -> dict:
+def _build_ydl_opts(status_callback=None, player_client: str = "android") -> dict:
     """Build yt-dlp options for YouTube audio download.
 
+    Uses Android client by default which avoids cloud IP 403 blocks and PO-token requirements.
     Uses Node.js/Deno runtime for JS challenge solving if available,
     plus YOUTUBE_COOKIES secret or cookies.txt if present for authentication.
     """
@@ -72,7 +73,7 @@ def _build_ydl_opts(status_callback=None) -> dict:
         "no_warnings": False,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "mweb", "web"],
+                "player_client": [player_client],
             }
         },
         "http_headers": {
@@ -137,38 +138,50 @@ def _build_ydl_opts(status_callback=None) -> dict:
 
 def download_youtube_audio(url: str, status_callback=None) -> str:
     clean_url = sanitize_youtube_url(url)
-    ydl_opts, temp_cookie_path = _build_ydl_opts(status_callback=status_callback)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            raw_filename = ydl.prepare_filename(info)
-            base_path = os.path.splitext(raw_filename)[0]
-            wav_path = base_path + ".wav"
-            
-            # Verify the file exists or locate it in DOWNLOAD_DIR
-            if not os.path.exists(wav_path):
-                title = info.get("title", "")
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if f.endswith(".wav") and (title[:15] in f if title else False):
-                        wav_path = os.path.join(DOWNLOAD_DIR, f)
-                        break
-        return wav_path
-    except Exception as e:
-        err_str = str(e)
+    
+    # Try Android client first (bypasses cloud IP 403 blocks), then fallback to iOS and TV
+    clients_to_try = ["android", "ios", "tv"]
+    last_error = None
+    
+    for client in clients_to_try:
+        ydl_opts, temp_cookie_path = _build_ydl_opts(status_callback=status_callback, player_client=client)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=True)
+                raw_filename = ydl.prepare_filename(info)
+                base_path = os.path.splitext(raw_filename)[0]
+                wav_path = base_path + ".wav"
+                
+                # Verify the file exists or locate it in DOWNLOAD_DIR
+                if not os.path.exists(wav_path):
+                    title = info.get("title", "")
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.endswith(".wav") and (title[:15] in f if title else False):
+                            wav_path = os.path.join(DOWNLOAD_DIR, f)
+                            break
+            if os.path.exists(wav_path):
+                return wav_path
+        except Exception as e:
+            last_error = e
+            print(f"  [yt-dlp] Client '{client}' failed, trying next fallback...: {e}")
+            continue
+        finally:
+            if temp_cookie_path and os.path.exists(temp_cookie_path):
+                try:
+                    os.remove(temp_cookie_path)
+                except Exception:
+                    pass
+
+    if last_error:
+        err_str = str(last_error)
         if any(keyword in err_str for keyword in ["403", "Forbidden", "confirm you're not a bot", "bot"]):
             raise RuntimeError(
                 "YouTube has blocked audio download on the cloud server (HTTP 403: Forbidden / Bot Check).\n\n"
                 "💡 To solve this:\n"
                 "1. Upload your video or audio file directly using the 'Upload Audio / Video File' button in the sidebar (recommended).\n"
                 "2. Or export your YouTube cookies and paste them into Streamlit Cloud App Settings -> Secrets as YOUTUBE_COOKIES."
-            ) from e
-        raise e
-    finally:
-        if temp_cookie_path and os.path.exists(temp_cookie_path):
-            try:
-                os.remove(temp_cookie_path)
-            except Exception:
-                pass
+            ) from last_error
+        raise last_error
 
 
 
